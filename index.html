@@ -184,7 +184,6 @@
 
 <div id="viewer">
   <div class="vbar">
-    <button id="close">閉じる</button>
     <span id="vcount"></span>
     <span style="display:flex;gap:8px">
       <button id="share">講評依頼</button>
@@ -277,7 +276,6 @@ function open(i){
   goFull();
   render();
 }
-$('close').onclick=()=>{viewer.classList.remove('open')};
 $('info').onclick=()=>{showExif=!showExif; $('exif').style.display=showExif?'':'none'};
 $('share').onclick=async()=>{
   const f=photos[cur].file;
