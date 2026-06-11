@@ -209,18 +209,51 @@ const goFull=()=>{
 };
 $('file').onchange=async e=>{
   const files=[...e.target.files];
-  await Promise.all(files.map(async f=>{
-    const p={url:URL.createObjectURL(f), file:f, exif:null, date:null};
-    p.exif=await readExif(f);
-    p.date=exifDate(p.exif)||new Date(f.lastModified);
-    photos.push(p);
+  e.target.value='';
+  if(!files.length)return;
+  const seen=new Set(photos.map(p=>p.file.name+'|'+p.file.size));
+  const queue=files.filter(f=>{
+    const k=f.name+'|'+f.size;
+    if(seen.has(k))return false; // 重複は読み込まない
+    seen.add(k); return true;
+  });
+  const total=queue.length; let done=0;
+  $('empty').style.display='none';
+  const tick=()=>{$('count').textContent=done<total?`読み込み中… ${done} / ${total}`:photos.length+' 枚'};
+  tick();
+  // 並列4本に制限してメモリ急増を防ぐ
+  await Promise.all([0,1,2,3].map(async()=>{
+    while(queue.length){
+      const f=queue.shift();
+      const exif=await readExif(f);
+      photos.push({
+        file:f, exif,
+        date:exifDate(exif)||new Date(f.lastModified),
+        thumb:await makeThumb(f)
+      });
+      done++; tick();
+    }
   }));
   photos.sort((a,b)=>b.date-a.date); // 新しい順
   rebuildGrid();
   $('empty').style.display=photos.length?'none':'flex';
-  $('count').textContent=photos.length+' 枚';
-  e.target.value='';
+  tick();
 };
+
+// 一覧用の縮小サムネイルを生成(原寸を一覧に並べない=メモリ対策)
+async function makeThumb(f){
+  try{
+    const bmp=await createImageBitmap(f,{imageOrientation:'from-image'});
+    const T=400, r=Math.min(1, Math.max(T/bmp.width, T/bmp.height));
+    const w=Math.max(1,Math.round(bmp.width*r)), h=Math.max(1,Math.round(bmp.height*r));
+    const c=document.createElement('canvas'); c.width=w; c.height=h;
+    c.getContext('2d').drawImage(bmp,0,0,w,h);
+    bmp.close();
+    const blob=await new Promise(res=>c.toBlob(res,'image/jpeg',0.8));
+    if(blob)return URL.createObjectURL(blob);
+  }catch(_){}
+  return URL.createObjectURL(f); // 失敗時は原寸で代用
+}
 
 function exifDate(x){
   // "2026:06:08 14:33:21" → Date
@@ -253,7 +286,7 @@ function rebuildGrid(){
     const b=document.createElement('button');
     b.className='thumb';
     const img=new Image();
-    img.src=p.url; img.loading='lazy'; img.alt='';
+    img.src=p.thumb; img.loading='lazy'; img.alt='';
     b.appendChild(img);
     b.onclick=()=>open(i);
     sect.appendChild(b);
@@ -264,13 +297,39 @@ function rebuildGrid(){
 const viewer=$('viewer'), stage=$('stage');
 let scale=1, tx=0, ty=0, imgEl=null;
 
+// 原寸は表示中±1枚だけURLを保持し、離れたら解放する
+const fullUrls=new Map();
+function fullUrl(p){
+  if(!fullUrls.has(p))fullUrls.set(p,URL.createObjectURL(p.file));
+  return fullUrls.get(p);
+}
+function pruneAndPreload(){
+  const keep=new Set([photos[cur-1],photos[cur],photos[cur+1]].filter(Boolean));
+  for(const [p,u] of fullUrls){
+    if(!keep.has(p)){URL.revokeObjectURL(u);fullUrls.delete(p);}
+  }
+  [cur-1,cur+1].forEach(i=>{ // 前後を裏で先読みしてスワイプ時のラグをなくす
+    const p=photos[i]; if(!p)return;
+    const im=new Image(); im.src=fullUrl(p);
+    if(im.decode)im.decode().catch(()=>{});
+  });
+}
+
 function open(i){
   cur=i; scale=1; tx=ty=0;
   viewer.classList.add('open');
   viewer.classList.remove('zen');
+  history.pushState({lt:1},''); // 戻る操作で一覧に戻れるように
   goFull();
   render();
 }
+function closeViewer(fromPop){
+  if(!viewer.classList.contains('open'))return;
+  viewer.classList.remove('open');
+  viewer.style.background='';
+  if(!fromPop&&history.state&&history.state.lt)history.back();
+}
+addEventListener('popstate',()=>closeViewer(true));
 $('info').onclick=()=>{showExif=!showExif; $('exif').style.display=showExif?'':'none'};
 $('share').onclick=async()=>{
   const f=photos[cur].file;
@@ -343,12 +402,13 @@ function renderReview(){
 function render(){
   stage.innerHTML='';
   imgEl=new Image();
-  imgEl.src=photos[cur].url;
+  imgEl.src=fullUrl(photos[cur]);
   stage.appendChild(imgEl);
   scale=1; tx=ty=0; apply();
   $('vcount').textContent=(cur+1)+' / '+photos.length;
   renderExif();
   renderReview();
+  pruneAndPreload();
 }
 function apply(){
   if(imgEl)imgEl.style.transform=
@@ -422,9 +482,8 @@ stage.addEventListener('touchend',e=>{
   if(scale===1){
     if(dragMode==='v'){ // 下に引いて一覧へ戻る
       if(ty>110){
-        viewer.classList.remove('open');
-        viewer.style.background='';
         tx=ty=0;
+        closeViewer(false);
       }else{
         tx=ty=0;
         if(imgEl)imgEl.style.transition='transform .2s';
@@ -449,7 +508,7 @@ addEventListener('keydown',e=>{
   if(!viewer.classList.contains('open'))return;
   if(e.key==='ArrowRight'&&cur<photos.length-1){cur++;render();}
   if(e.key==='ArrowLeft'&&cur>0){cur--;render();}
-  if(e.key==='Escape')viewer.classList.remove('open');
+  if(e.key==='Escape')closeViewer(false);
 });
 
 /* ---------- 簡易EXIFパーサー(JPEG APP1) ---------- */
