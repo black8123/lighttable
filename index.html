@@ -131,6 +131,20 @@
     color:var(--text-dim);
   }
   #viewer.zen .vbar,#viewer.zen #exif{opacity:0;pointer-events:none}
+  /* 講評パネル */
+  #review{
+    position:absolute;left:12px;right:12px;bottom:96px;z-index:3;
+    max-height:42%;overflow-y:auto;display:none;
+    padding:14px 16px;border-radius:10px;
+    background:rgba(12,13,15,.92);backdrop-filter:blur(6px);
+    border-left:2px solid var(--accent);
+    font-size:12.5px;line-height:1.9;color:var(--text);
+    white-space:pre-wrap;
+  }
+  #review.show{display:block}
+  #review .racts{margin-top:10px;display:flex;gap:16px}
+  #review .racts span{color:var(--text-dim);font-size:11px;text-decoration:underline;cursor:pointer}
+  .btn-on{color:var(--accent) !important}
   input[type=file]{display:none}
 </style>
 </head>
@@ -172,9 +186,14 @@
   <div class="vbar">
     <button id="close">閉じる</button>
     <span id="vcount"></span>
-    <button id="info">情報</button>
+    <span style="display:flex;gap:8px">
+      <button id="share">Claudeに送る</button>
+      <button id="review-btn">講評</button>
+      <button id="info">情報</button>
+    </span>
   </div>
   <div id="stage"></div>
+  <div id="review"></div>
   <div id="exif"></div>
 </div>
 
@@ -260,6 +279,73 @@ function open(i){
 }
 $('close').onclick=()=>{viewer.classList.remove('open')};
 $('info').onclick=()=>{showExif=!showExif; $('exif').style.display=showExif?'':'none'};
+$('share').onclick=async()=>{
+  const f=photos[cur].file;
+  if(navigator.canShare&&navigator.canShare({files:[f]})){
+    try{
+      await navigator.share({
+        files:[f],
+        text:'この写真を講評してください。構図・露出・色について良い点と改善点を教えて。'
+      });
+    }catch(_){/* キャンセル時は何もしない */}
+  }else{
+    alert('この端末のブラウザはファイル共有に対応していません');
+  }
+};
+
+/* ---------- 講評:クリップボード自動読み取り&端末内保存 ---------- */
+const rKey=p=>p.file.name+'|'+p.file.size;
+const loadReviews=()=>{try{return JSON.parse(localStorage.getItem('lt-reviews')||'{}')}catch(_){return{}}};
+const saveReviews=r=>{try{localStorage.setItem('lt-reviews',JSON.stringify(r))}catch(_){}};
+
+$('review-btn').onclick=async()=>{
+  const p=photos[cur], r=loadReviews(), panel=$('review');
+  if(r[rKey(p)]){ panel.classList.toggle('show'); return; }
+  // 未保存ならクリップボードから自動取得
+  try{
+    const t=(await navigator.clipboard.readText()).trim();
+    if(!t){alert('クリップボードが空です。Claudeの講評をコピーしてから押してください。');return;}
+    if(confirm('コピー中のテキストをこの写真の講評として保存しますか?\n\n「'+t.slice(0,60)+'…」')){
+      r[rKey(p)]={text:t,date:new Date().toISOString()};
+      saveReviews(r);
+      renderReview();
+      panel.classList.add('show');
+    }
+  }catch(_){
+    alert('クリップボードを読み取れませんでした。許可を求められたら「許可」を選んでください。');
+  }
+};
+
+function renderReview(){
+  const p=photos[cur], r=loadReviews(), panel=$('review'), btn=$('review-btn');
+  const item=r[rKey(p)];
+  panel.classList.remove('show');
+  if(item){
+    btn.classList.add('btn-on');
+    panel.textContent=item.text;
+    const acts=document.createElement('div'); acts.className='racts';
+    const re=document.createElement('span'); re.textContent='貼り直す';
+    re.onclick=async()=>{
+      try{
+        const t=(await navigator.clipboard.readText()).trim();
+        if(t&&confirm('講評を貼り直しますか?')){
+          r[rKey(p)]={text:t,date:new Date().toISOString()};
+          saveReviews(r); renderReview(); panel.classList.add('show');
+        }
+      }catch(_){alert('クリップボードを読み取れませんでした');}
+    };
+    const del=document.createElement('span'); del.textContent='削除';
+    del.onclick=()=>{
+      if(confirm('この講評を削除しますか?')){
+        delete r[rKey(p)]; saveReviews(r); renderReview();
+      }
+    };
+    acts.append(re,del); panel.appendChild(acts);
+  }else{
+    btn.classList.remove('btn-on');
+    panel.textContent='';
+  }
+}
 
 function render(){
   stage.innerHTML='';
@@ -269,6 +355,7 @@ function render(){
   scale=1; tx=ty=0; apply();
   $('vcount').textContent=(cur+1)+' / '+photos.length;
   renderExif();
+  renderReview();
 }
 function apply(){
   if(imgEl)imgEl.style.transform=
