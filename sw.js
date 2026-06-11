@@ -1,4 +1,4 @@
-const CACHE = "lighttable-v6";
+const CACHE = "lighttable-v7";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
