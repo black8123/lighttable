@@ -208,17 +208,64 @@ const goFull=()=>{
   const d=document.documentElement;
   if(!document.fullscreenElement&&d.requestFullscreen)d.requestFullscreen().catch(()=>{});
 };
+/* ---------- 端末内ライブラリ(IndexedDB):終了後も一覧を保持 ---------- */
+let _db;
+const idb=()=>new Promise((res,rej)=>{
+  if(_db)return res(_db);
+  const q=indexedDB.open('lighttable',1);
+  q.onupgradeneeded=()=>q.result.createObjectStore('photos',{keyPath:'id'});
+  q.onsuccess=()=>{_db=q.result;res(_db)};
+  q.onerror=()=>rej(q.error);
+});
+const idbPut=rec=>idb().then(d=>new Promise((res,rej)=>{
+  const t=d.transaction('photos','readwrite');
+  t.objectStore('photos').put(rec);
+  t.oncomplete=res; t.onerror=()=>rej(t.error);
+}));
+const idbAll=()=>idb().then(d=>new Promise((res,rej)=>{
+  const q=d.transaction('photos').objectStore('photos').getAll();
+  q.onsuccess=()=>res(q.result||[]); q.onerror=()=>rej(q.error);
+}));
+const idbDel=id=>idb().then(d=>new Promise((res,rej)=>{
+  const t=d.transaction('photos','readwrite');
+  t.objectStore('photos').delete(id);
+  t.oncomplete=res; t.onerror=()=>rej(t.error);
+}));
+const pId=p=>p.file.name+'|'+p.file.size;
+
+// 起動時:保存済みライブラリを復元
+(async()=>{
+  try{
+    const recs=await idbAll();
+    if(recs.length){
+      for(const r of recs){
+        photos.push({
+          file:r.file, exif:r.exif||null,
+          date:new Date(r.dateMs),
+          thumb:URL.createObjectURL(r.thumb||r.file)
+        });
+      }
+      photos.sort((a,b)=>b.date-a.date);
+      rebuildGrid();
+      $('empty').style.display='none';
+      $('count').textContent=photos.length+' 枚';
+    }
+  }catch(_){}
+  // ブラウザによる自動削除を防ぐため永続化を要求
+  if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+})();
+
 $('file').onchange=async e=>{
   const files=[...e.target.files];
   e.target.value='';
   if(!files.length)return;
-  const seen=new Set(photos.map(p=>p.file.name+'|'+p.file.size));
+  const seen=new Set(photos.map(pId));
   const queue=files.filter(f=>{
     const k=f.name+'|'+f.size;
     if(seen.has(k))return false; // 重複は読み込まない
     seen.add(k); return true;
   });
-  const total=queue.length; let done=0;
+  const total=queue.length; let done=0, quotaWarned=false;
   $('empty').style.display='none';
   const tick=()=>{$('count').textContent=done<total?`読み込み中… ${done} / ${total}`:photos.length+' 枚'};
   tick();
@@ -227,11 +274,18 @@ $('file').onchange=async e=>{
     while(queue.length){
       const f=queue.shift();
       const exif=await readExif(f);
+      const date=exifDate(exif)||new Date(f.lastModified);
+      const thumbBlob=await makeThumb(f);
       photos.push({
-        file:f, exif,
-        date:exifDate(exif)||new Date(f.lastModified),
-        thumb:await makeThumb(f)
+        file:f, exif, date,
+        thumb:URL.createObjectURL(thumbBlob||f)
       });
+      try{ // 端末内ライブラリへ保存(次回起動時に復元)
+        await idbPut({id:f.name+'|'+f.size, file:f, exif, dateMs:date.getTime(), thumb:thumbBlob});
+      }catch(_){
+        if(!quotaWarned){quotaWarned=true;
+          alert('端末の保存領域が足りないため、一部の写真は次回起動時に復元されません。');}
+      }
       done++; tick();
     }
   }));
@@ -240,6 +294,16 @@ $('file').onchange=async e=>{
   $('empty').style.display=photos.length?'none':'flex';
   tick();
 };
+
+// 一覧から1枚削除(端末内ライブラリからも除去。元の写真ファイルは消えない)
+async function removePhoto(p){
+  try{await idbDel(pId(p));}catch(_){}
+  const i=photos.indexOf(p);
+  if(i>=0){URL.revokeObjectURL(photos[i].thumb);photos.splice(i,1);}
+  rebuildGrid();
+  $('count').textContent=photos.length+' 枚';
+  $('empty').style.display=photos.length?'none':'flex';
+}
 
 // 一覧用の縮小サムネイルを生成(原寸を一覧に並べない=メモリ対策)
 async function makeThumb(f){
@@ -251,9 +315,9 @@ async function makeThumb(f){
     c.getContext('2d').drawImage(bmp,0,0,w,h);
     bmp.close();
     const blob=await new Promise(res=>c.toBlob(res,'image/jpeg',0.8));
-    if(blob)return URL.createObjectURL(blob);
+    if(blob)return blob;
   }catch(_){}
-  return URL.createObjectURL(f); // 失敗時は原寸で代用
+  return null; // 失敗時は原寸で代用
 }
 
 function exifDate(x){
@@ -289,7 +353,17 @@ function rebuildGrid(){
     const img=new Image();
     img.src=p.thumb; img.loading='lazy'; img.alt='';
     b.appendChild(img);
-    b.onclick=()=>open(i);
+    // 長押しで一覧から削除(元の写真は消えない)
+    let lp=null, lpFired=false;
+    const askDel=()=>{
+      lpFired=true;
+      if(confirm('この写真を一覧から削除しますか?\n(端末ギャラリーの元の写真は消えません)'))removePhoto(p);
+    };
+    b.addEventListener('touchstart',()=>{lpFired=false;lp=setTimeout(askDel,600)},{passive:true});
+    b.addEventListener('touchmove',()=>{clearTimeout(lp)},{passive:true});
+    b.addEventListener('touchend',()=>{clearTimeout(lp)});
+    b.oncontextmenu=e=>{e.preventDefault();askDel();};
+    b.onclick=()=>{if(lpFired){lpFired=false;return;}open(i);};
     sect.appendChild(b);
   });
 }
