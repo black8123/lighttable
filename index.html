@@ -551,7 +551,11 @@ stage.addEventListener('touchend',e=>{
       scale=scale>1?1:2.5; tx=ty=0; apply(); lastTap=0; return;
     }
     lastTap=now;
-    setTimeout(()=>{ if(Date.now()-lastTap>=290&&lastTap!==0){viewer.classList.toggle('zen')} },300);
+    setTimeout(()=>{ if(Date.now()-lastTap>=290&&lastTap!==0){
+      const panel=$('review');
+      if(panel.classList.contains('show'))panel.classList.remove('show'); // 講評表示中は先に仕舞う
+      else viewer.classList.toggle('zen');
+    } },300);
     return;
   }
   if(scale===1){
